@@ -16,10 +16,15 @@ const MessageType = enum(u7) {
     stderr = 2,
     arg = 3,
     env_var = 4,
-    binary = 5,
-    jsonrpc = 6,
-    sized_binary = 7,
+    stream_init = 5,
+    stream_data = 6,
+    jsonrpc = 7,
     get_pid = 8,
+};
+
+const ProtocolMode = enum(u8) {
+    advanced = 0x00,
+    simple = 0x01,
 };
 
 fn sendFrame(writer: anytype, msg_type: MessageType, more: bool, payload: []const u8) !void {
@@ -48,6 +53,7 @@ pub fn main(init: std.process.Init) !void {
     var daemon_cmd: ?[]const u8 = null;
     var daemon_timeout_ms: u32 = 3000;
     var is_restart = false;
+    var mode: ProtocolMode = .advanced;
     var client_args: std.ArrayList([]const u8) = .empty;
     defer client_args.deinit(allocator);
 
@@ -66,6 +72,15 @@ pub fn main(init: std.process.Init) !void {
             }
         } else if (std.mem.eql(u8, args[i], "--restart")) {
             is_restart = true;
+        } else if (std.mem.eql(u8, args[i], "--mode")) {
+            i += 1;
+            if (i < args.len) {
+                if (std.mem.eql(u8, args[i], "simple")) {
+                    mode = .simple;
+                } else {
+                    mode = .advanced;
+                }
+            }
         } else if (std.mem.eql(u8, args[i], "--")) {
             i += 1;
             while (i < args.len) : (i += 1) {
@@ -88,6 +103,8 @@ pub fn main(init: std.process.Init) !void {
     };
     defer stream.close(io);
 
+    // 2.5 Proceed directly to mode-specific logic
+
     if (is_restart) {
         var writer = stream.writer(io, &[_]u8{});
         try sendFrame(&writer.interface, .exit_code, false, &.{ 0, 0, 0, 0 });
@@ -96,7 +113,73 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // 3. Socket construct & send header
+    if (mode == .simple) {
+        // 3. Simple Mode: Assemble Metadata Block
+        var meta: std.ArrayList(u8) = .empty;
+        try meta.appendSlice(allocator, args[0]);
+        try meta.append(allocator, 0);
+        const current_pwd = try std.process.currentPathAlloc(io, allocator);
+        try meta.appendSlice(allocator, current_pwd);
+        try meta.append(allocator, 0);
+        for (client_args.items) |arg| {
+            try meta.appendSlice(allocator, arg);
+            try meta.append(allocator, 0);
+        }
+        var env_iter = init.environ_map.iterator();
+        while (env_iter.next()) |entry| {
+            try meta.appendSlice(allocator, entry.key_ptr.*);
+            try meta.append(allocator, '=');
+            try meta.appendSlice(allocator, entry.value_ptr.*);
+            try meta.append(allocator, 0);
+        }
+        try meta.append(allocator, 0); // Terminal null
+
+        // Send Length + Metadata
+        var meta_writer = stream.writer(io, &[_]u8{});
+        try meta_writer.interface.writeInt(u32, @intCast(meta.items.len), .big);
+        try meta_writer.interface.writeAll(meta.items);
+        try meta_writer.interface.flush();
+
+        // Start Raw Piping
+        const pipe_stdout = struct {
+            fn run_pipe(sock: std.Io.net.Stream, thread_io: std.Io) !void {
+                const stdout_file = std.Io.File.stdout();
+                var read_buf: [BUFFER_SIZE]u8 = undefined;
+                var stream_reader = sock.reader(thread_io, &read_buf);
+                const reader = &stream_reader.interface;
+                var chunk: [BUFFER_SIZE]u8 = undefined;
+                while (true) {
+                    const n = reader.readSliceShort(&chunk) catch |err| {
+                        if (err == error.EndOfStream) break;
+                        return err;
+                    };
+                    if (n == 0) break;
+                    try stdout_file.writeStreamingAll(thread_io, chunk[0..n]);
+                }
+            }
+        };
+        const thread = try std.Thread.spawn(.{}, pipe_stdout.run_pipe, .{ stream, io });
+        thread.detach();
+
+        var stdin_buf: [BUFFER_SIZE]u8 = undefined;
+        var stdin_file_reader = std.Io.File.stdin().reader(io, &stdin_buf);
+        const stdin_reader = &stdin_file_reader.interface;
+        var write_buf: [BUFFER_SIZE]u8 = undefined;
+        var sock_writer_simple = stream.writer(io, &write_buf);
+        var input_buf: [BUFFER_SIZE]u8 = undefined;
+        while (true) {
+            const amt = stdin_reader.readSliceShort(&input_buf) catch |err| {
+                if (err == error.EndOfStream) break;
+                return err;
+            };
+            if (amt == 0) break;
+            try sock_writer_simple.interface.writeAll(input_buf[0..amt]);
+            try sock_writer_simple.interface.flush();
+        }
+        return;
+    }
+
+    // 3. Socket construct & send header (Advanced Mode)
     var sock_buf: [BUFFER_SIZE]u8 = undefined;
     var sock_buffered_writer = stream.writer(io, &sock_buf);
     const sock_writer = &sock_buffered_writer.interface;
@@ -187,7 +270,12 @@ pub fn main(init: std.process.Init) !void {
             return err;
         };
         if (amt == 0) break;
-        try sendFrame(sock_writer, .binary, false, input_buf[0..amt]);
+        // Advanced Mode: For legacy/basic piping of stdin, we wrap it in stream_data with ID 0.
+        var payload = try allocator.alloc(u8, amt + 1);
+        defer allocator.free(payload);
+        payload[0] = 0; // Stream ID 0
+        @memcpy(payload[1..], input_buf[0..amt]);
+        try sendFrame(sock_writer, .stream_data, false, payload);
         try sock_writer.flush();
     }
 }

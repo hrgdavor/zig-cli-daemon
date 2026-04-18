@@ -1,19 +1,18 @@
 # Zig CLI Daemon Bridge
 
-Minimize execution latency by maintaining a long-running background daemon and passing arguments, `stdin`, and `stdout` over Unix Sockets.
-
-## Compatibility
-
-> [!IMPORTANT]
-> This project requires **Native Unix Domain Socket** support.
-> - **Windows**: Requires **Windows 10 Version 1803** (Build 17063) or newer.
-> - **Linux/macOS**: Supported natively on all modern versions.
-> - **Java**: Requires **OpenJDK 16+** for native `java.net` support (Project uses **Java 17**).
-> - **Zig**: Requires **Zig 0.16.0** (standard library `std.Io` and `std.process` integration).
+Minimize execution latency by maintaining a long-running background daemon and passing arguments, `stdin`, `stdout`, and `stderr` over Unix Sockets.
 
 Initially made to help optimize Java process startup time for repeated tasks like testing and compilation. 
 
 > High-performance, zero allocation, written in Zig 0.16.0 and faster alternative to `socat + cat` combo.
+
+## Compatibility
+
+This project requires **Native Unix Domain Socket** support.
+- **Windows**: Requires **Windows 10 Version 1803** (Build 17063) or newer.
+- **Linux/macOS**: Supported natively on all modern versions.
+- **Java**: Requires **OpenJDK 16+** for native `java.net` support (Project uses **Java 17**).
+- **Zig**: Requires **Zig 0.16.0** (standard library `std.Io` and `std.process` integration).
 
 ## Use cases & Advantages (Unix Sockets vs TCP)
 
@@ -128,28 +127,57 @@ Because the OS rejects dead Unix Sockets instantly (vs. TCP handshake delays), t
 java -jar new-worker-v2.jar &
 ```
 
-## Technical Protocol Specification (ZMTP-Style)
+## Technical Protocol Specification
 
-The bridge uses a 4-byte header framing protocol to multiplex data types and lifecycle events over a single Unix socket connection.
+The bridge and daemon must be pre-coordinated to use the same mode. There is no negotiation header.
 
-### Frame Header (4 Bytes)
+### Simple Mode (`--mode simple`)
+
+Designed for easy daemon implementation.
+
+1. **Metadata Block**: `[u32 length (BE)] [null-terminated strings...]`
+   - Strings: `exec\0pwd\0arg1\0arg2\0...\0ENV1=val\0ENV2=val\0\0`
+   - Double null (`\0\0`) terminates the block.
+2. **Raw Bidirectional Pipe**: All subsequent bytes flow transparently between CLI stdin/stdout and the daemon socket.
+
+### Advanced Mode (`--mode advanced`, default)
+
+Uses a ZMTP-style 4-byte header framing protocol to multiplex data types over a single connection.
+
+#### Frame Header (4 Bytes)
 - **Byte 0**: `[Type: 7 bits | More: 1 bit]`
   - `Bits 1-7`: Message Type.
   - `Bit 0`: `More` flag (1 = another frame follows for this logical message).
 - **Bytes 1-3**: `Payload Length` (24-bit unsigned integer, Big Endian).
 
-### Message Types
-| Type | Name | Direction | Payload |
-| :--- | :--- | :--- | :--- |
-| **0** | **Exit Code** | Bi-Di | 4 bytes (Big Endian Exit Status) |
-| **1** | **Stdout** | Daemon -> CLI | Raw stream chunk |
-| **2** | **Stderr** | Daemon -> CLI | Raw stream chunk |
-| **3** | **Argument** | CLI -> Daemon | UTF-8 String (Order: Exec, PWD, Args...) |
-| **4** | **Env Var** | CLI -> Daemon | `NAME=VALUE` UTF-8 String |
-| **5** | **Binary** | Bi-Di | Raw binary payload |
-| **6** | **JSON-RPC**| Bi-Di | UTF-8 JSON String |
-| **7** | **Sized Bin**| Bi-Di | 8-byte size prefix + Raw Binary |
-| **8** | **Get PID**  | Bi-Di | Returns the Daemon process ID |
+#### Message Types
+| Type  | Name            | Direction     | Payload                                              |
+| ----- | --------------- | ------------- | ---------------------------------------------------- |
+| **0** | **Exit Code**   | Bi-Di         | 4 bytes (Big Endian Exit Status)                     |
+| **1** | **Stdout**      | Daemon -> CLI | Raw stream chunk                                     |
+| **2** | **Stderr**      | Daemon -> CLI | Raw stream chunk                                     |
+| **3** | **Argument**    | CLI -> Daemon | UTF-8 String (Order: Exec, PWD, Args...)             |
+| **4** | **Env Var**     | CLI -> Daemon | `NAME=VALUE` UTF-8 String                            |
+| **5** | **Stream Init** | Bi-Di         | `[1 byte ID] [8 bytes total size] [UTF-8 Name/Path]` |
+| **6** | **Stream Data** | Bi-Di         | `[1 byte ID] [Raw Payload]`                          |
+| **7** | **JSON-RPC**    | Bi-Di         | UTF-8 JSON String                                    |
+| **8** | **Get PID**     | Bi-Di         | Returns the Daemon process ID                        |
+
+## Reference Implementations (Java)
+
+The project includes two standalone Java implementations:
+
+### 1. Simple Daemon
+Raw pipe, no framing. Ideal for minimal tools.
+```bash
+java -cp target/daemon-1.0.0.jar hr.hrg.daemon.simple.Main
+```
+
+### 2. Advanced Daemon
+Full multiplexed framing protocol.
+```bash
+java -cp target/daemon-1.0.0.jar hr.hrg.daemon.advanced.Main
+```
 
 ## Background Diagnostics
 

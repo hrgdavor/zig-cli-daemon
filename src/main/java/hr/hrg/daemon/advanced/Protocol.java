@@ -1,4 +1,4 @@
-package hr.hrg.daemon;
+package hr.hrg.daemon.advanced;
 
 import java.io.EOFException;
 import java.io.IOException;
@@ -13,9 +13,9 @@ public class Protocol {
         STDERR(), // 2
         ARG(), // 3
         ENV_VAR(), // 4
-        BINARY(), // 5
-        JSONRPC(), // 6
-        SIZED_BINARY(), // 7
+        STREAM_INIT(), // 5
+        STREAM_DATA(), // 6
+        JSONRPC(), // 7
         GET_PID(),// 8
         ;
 
@@ -30,9 +30,9 @@ public class Protocol {
                 case 2 -> STDERR;
                 case 3 -> ARG;
                 case 4 -> ENV_VAR;
-                case 5 -> BINARY;
-                case 6 -> JSONRPC;
-                case 7 -> SIZED_BINARY;
+                case 5 -> STREAM_INIT;
+                case 6 -> STREAM_DATA;
+                case 7 -> JSONRPC;
                 case 8 -> GET_PID;
                 default -> null;
             };
