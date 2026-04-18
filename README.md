@@ -35,8 +35,8 @@ Major high-performance systems default to Unix sockets for local IPC:
 - **Databases & Proxies**: PostgreSQL (`.s.PGSQL.5432`), Redis, and Nginx reverse-proxies (e.g., PHP-FPM/uWSGI) often connect across local Unix sockets in production to strip TCP processing lag.
 
 ### Configuration Best Practices
-- **Secure Namespaces**: Always host the socket file in isolated user-bound directory paths (e.g., `/tmp/user_scope/` or `/run/user/1000/`) rather than the open `/tmp/` root. 
-- **Stale Socket Handling**: Operating system crashes can leave stale socket files behind. This CLI bridge natively captures connection refusal faults to identify stale nodes and forcefully boots the background worker back up.
+- **Secure Namespaces**: Always host the socket file in isolated user-bound directory paths (e.g., `/tmp/user_scope/` or `/run/user/1000/`) rather than the open `/tmp/` root. The Java daemon automatically applies **`0700` (Owner-Only) POSIX permissions** to the socket file upon binding on supported systems to prevent unauthorized access.
+- **Stale Socket Handling**: Operating system crashes can leave stale socket files behind. This CLI bridge natively captures `ConnectionRefused` faults to identify stale nodes, automatically deletes the stale socket file, and forcefully boots the background worker back up.
 - **Path Length Limits**: POSIX structures rigidly limit Unix socket system paths to `108 bytes`. Do not generate excessively deep file structures for the connection target.
 
 ## Features
@@ -44,6 +44,8 @@ Major high-performance systems default to Unix sockets for local IPC:
 - **Optimistic Auto-Restart**: The bridge assumes the daemon is alive for raw `0ms` overhead. If the Unix socket is down, it natively auto-spawns the fallback process in the background, polling efficiently until the socket connects.
 - **Zero-Allocation Data Streams**: Built natively against the Zig 0.16.0 `std.Io` subsystem, eliminating standard library allocations by buffering everything via static stack chunks mapping.
 - **Bi-Directional Bridging**: Connects isolated processes dynamically, piping internal Linux/Windows standard streams dynamically across the socket.
+- **Environment & CWD Forwarding**: Automatically captures and serializes the caller's environment map and absolute working directory to the daemon.
+- **Multiplexed I/O & Exit Codes**: Supports interleaved `stdout` and `stderr` streams, and propagates the daemon's exit status back to the CLI shell.
 - **Superior to `socat` + `cat` Shelling**: Traditional bash scripting around `socat` requires generating expensive subshells, lacks CWD alignment out-of-the-box, and struggles with pure bi-directional stream multiplexing synchronization. This tool handles pure byte-for-byte stream forwarding efficiently in user space without spawning piped subshells.
 - **Frictionless Cross-Compilation**: Leveraging Zig's world-class toolchain, this bridge produces a statically linked, ultra-efficient standalone payload that seamlessly compiles to hundreds of architectures (Linux, macOS, Windows/WSL) via a single command, dropping the heavy external dependency requirements typical in production environments.
 
@@ -64,7 +66,7 @@ zig build -Doptimize=ReleaseFast
 The CLI acts as a transparent proxy. You invoke the bridge instead of your application, and inject the bridge configuration before your target daemon arguments.
 
 ```bash
-zig_cli_daemon --daemon-socket <path_to_socket> --daemon-cmd "<fallback_start_cmd>" --daemon-timeout <ms> -- <forwarded_args>...
+zig_cli_daemon --daemon-socket <path_to_socket> --daemon-cmd "<fallback_start_cmd>" --daemon-timeout <ms> [--restart] -- <forwarded_args>...
 ```
 
 ### Bridge Arguments
@@ -72,6 +74,7 @@ zig_cli_daemon --daemon-socket <path_to_socket> --daemon-cmd "<fallback_start_cm
 - `--daemon-socket <path>`: Path to the Unix domain socket (default: `/tmp/java-daemon.sock`).
 - `--daemon-cmd <command>`: Shell command to start the daemon if the socket is missing.
 - `--daemon-timeout <ms>`: Max time in milliseconds to wait for the daemon to start (default: `3000ms`).
+- `--restart`: Sends a Type 0 shutdown signal to a running daemon and exits.
 - `--`: Delimiter separating bridge flags from application arguments.
 - `<forwarded_args>`: The normal CLI arguments your background process is designed to handle.
 
@@ -125,7 +128,30 @@ Because the OS rejects dead Unix Sockets instantly (vs. TCP handshake delays), t
 java -jar new-worker-v2.jar &
 ```
 
+## Technical Protocol Specification (ZMTP-Style)
+
+The bridge uses a 4-byte header framing protocol to multiplex data types and lifecycle events over a single Unix socket connection.
+
+### Frame Header (4 Bytes)
+- **Byte 0**: `[Type: 7 bits | More: 1 bit]`
+  - `Bits 1-7`: Message Type.
+  - `Bit 0`: `More` flag (1 = another frame follows for this logical message).
+- **Bytes 1-3**: `Payload Length` (24-bit unsigned integer, Big Endian).
+
+### Message Types
+| Type | Name | Direction | Payload |
+| :--- | :--- | :--- | :--- |
+| **0** | **Exit Code** | Bi-Di | 4 bytes (Big Endian Exit Status) |
+| **1** | **Stdout** | Daemon -> CLI | Raw stream chunk |
+| **2** | **Stderr** | Daemon -> CLI | Raw stream chunk |
+| **3** | **Argument** | CLI -> Daemon | UTF-8 String (Order: Exec, PWD, Args...) |
+| **4** | **Env Var** | CLI -> Daemon | `NAME=VALUE` UTF-8 String |
+| **5** | **Binary** | Bi-Di | Raw binary payload |
+| **6** | **JSON-RPC**| Bi-Di | UTF-8 JSON String |
+| **7** | **Sized Bin**| Bi-Di | 8-byte size prefix + Raw Binary |
+| **8** | **Get PID**  | Bi-Di | Returns the Daemon process ID |
+
 ## Background Diagnostics
 
 1. **Path Alignment Forwarding**: Upon connection, the CLI will predictably send its absolute Current Working Directory (`CWD`) via Zig's `std.process.currentPathAlloc()` straight into the daemon buffer, allowing your long-running java application to calculate relative compilation and read instructions normally.
-2. **Optimistic Thread Link**: If linking to the socket fails (`error.FileNotFound`), the application detaches an internal `std.Thread` and asynchronously launches the daemon command using OS level `spawn` mechanics. It polls up to `500ms` concurrently until establishing socket access.
+2. **Optimistic Thread Link**: If linking to the socket fails (`error.FileNotFound`), the application detaches an internal `std.Thread` and asynchronously launches the daemon command using OS level `spawn` mechanics. It polls up to `3000ms` concurrently until establishing socket access.

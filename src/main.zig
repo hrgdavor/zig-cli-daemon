@@ -1,7 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 // Default configuration if not overridden by arguments
-const DEFAULT_SOCKET_PATH = "/tmp/java-daemon.sock";
+const DEFAULT_SOCKET_PATH = switch (builtin.os.tag) {
+    .windows => "daemon.sock",
+    else => "/tmp/java-daemon.sock",
+};
 const DEFAULT_DAEMON_CMD = "java -jar daemon.jar";
 
 const BUFFER_SIZE = 4096;
@@ -205,8 +209,14 @@ fn connectToDaemonOrSpawn(
         return stream;
     } else |err| {
         switch (err) {
-            error.FileNotFound => {
-                // Daemon is either not running or in a bad state. Spawn it.
+            error.FileNotFound, error.Unexpected => {
+                // Daemon is either not running or in a bad state (stale socket).
+                // Note: error.Unexpected is a proxy for ConnectionRefused in some Zig 0.16.0 targets.
+                if (err == error.Unexpected) {
+                    std.debug.print("Stale socket detected. Forcing daemon restart...\n", .{});
+                    std.Io.Dir.cwd().deleteFile(io, socket_path) catch {};
+                }
+
                 try spawnDaemon(io, allocator, daemon_cmd_str);
 
                 // Retry connecting with a 10ms delay between attempts
@@ -222,7 +232,7 @@ fn connectToDaemonOrSpawn(
                         return stream;
                     } else |retry_err| {
                         switch (retry_err) {
-                            error.FileNotFound => continue,
+                            error.FileNotFound, error.Unexpected => continue,
                             else => return retry_err,
                         }
                     }
@@ -237,24 +247,45 @@ fn connectToDaemonOrSpawn(
 /// Tokenizes the daemon command string and spawns the process detached
 fn spawnDaemon(io: std.Io, allocator: std.mem.Allocator, daemon_cmd_str: []const u8) !void {
     var cmd_args: std.ArrayList([]const u8) = .empty;
-    defer cmd_args.deinit(allocator);
-    var iter = std.mem.tokenizeAny(u8, daemon_cmd_str, " ");
-    while (iter.next()) |token| {
-        try cmd_args.append(allocator, token);
+    defer {
+        for (cmd_args.items) |arg| allocator.free(arg);
+        cmd_args.deinit(allocator);
+    }
+
+    // Split by space but respect quotes
+    var i: usize = 0;
+    while (i < daemon_cmd_str.len) {
+        while (i < daemon_cmd_str.len and daemon_cmd_str[i] == ' ') i += 1;
+        if (i == daemon_cmd_str.len) break;
+
+        var start = i;
+        if (daemon_cmd_str[i] == '"') {
+            i += 1;
+            start = i;
+            while (i < daemon_cmd_str.len and daemon_cmd_str[i] != '"') i += 1;
+            try cmd_args.append(allocator, try allocator.dupe(u8, daemon_cmd_str[start..i]));
+            if (i < daemon_cmd_str.len) i += 1;
+        } else {
+            while (i < daemon_cmd_str.len and daemon_cmd_str[i] != ' ') i += 1;
+            try cmd_args.append(allocator, try allocator.dupe(u8, daemon_cmd_str[start..i]));
+        }
     }
 
     if (cmd_args.items.len == 0) return error.EmptyDaemonCommand;
-
+    
     // Spawn the daemon. In Zig 0.16.0 we use std.process.spawn.
-    // If we just want to launch it, we don't wait for it unless we spawn a zombie-reaping thread.
     // We will spawn a detached thread to wait on it and avoid zombie processes on UNIX.
     const run_daemon_thread = struct {
         fn run(thread_io: std.Io, thread_allocator: std.mem.Allocator, args: [][]const u8) void {
-            var child = std.process.spawn(thread_io, .{ .argv = args }) catch |err| {
+            var child = std.process.spawn(thread_io, .{
+                .argv = args,
+                .stderr = .inherit, // Pipe stderr to bridge's stderr for debugging
+            }) catch |err| {
                 std.debug.print("Warning: Failed to execute daemon spawn command: {s}\n", .{@errorName(err)});
                 return;
             };
             _ = child.wait(thread_io) catch {}; // Reaps the child process natively
+            for (args) |arg| thread_allocator.free(arg);
             thread_allocator.free(args);
         }
     };

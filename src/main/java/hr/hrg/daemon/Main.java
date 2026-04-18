@@ -16,7 +16,8 @@ import java.util.List;
 
 public class Main {
     // Shared reference to the socket path
-    static final Path SOCKET_PATH = Path.of(System.getProperty("daemon.sock", "/tmp/java-daemon.sock"));
+    static final Path SOCKET_PATH = Path.of(System.getProperty("daemon.sock", 
+        System.getProperty("os.name").startsWith("Windows") ? "daemon.sock" : "/tmp/java-daemon.sock"));
 
     public static void main(String[] args) throws IOException {
         // Ensure parent directory exists for the socket
@@ -38,7 +39,17 @@ public class Main {
         // Use Java 16+ native ServerSocketChannel for AF_UNIX
         try (ServerSocketChannel server = ServerSocketChannel.open(StandardProtocolFamily.UNIX)) {
             server.bind(address);
-            System.out.println("Daemon started on " + SOCKET_PATH);
+            System.out.println("Daemon started on " + SOCKET_PATH + " using " + System.getProperty("java.runtime.name") + " " + System.getProperty("java.runtime.version"));
+
+            // Enforce 0700 permissions on non-Windows systems
+            if (!System.getProperty("os.name").startsWith("Windows")) {
+                try {
+                    Files.setPosixFilePermissions(SOCKET_PATH, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+                    System.out.println("Security: Socket restricted to owner-only (0700).");
+                } catch (UnsupportedOperationException e) {
+                    System.err.println("Warning: Filesystem does not support POSIX permissions.");
+                }
+            }
 
             while (true) {
                 // Accept new bridge connections
