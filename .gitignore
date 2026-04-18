@@ -1,0 +1,12 @@
+/target/
+*.class
+.mvn/
+.project
+.settings
+.classpath
+.idea/
+*.iml
+*.log
+.zig-cache
+zig-out/bin
+agent.md
