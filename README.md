@@ -11,8 +11,15 @@ Initially made to help optimize Java process startup time for repeated tasks lik
 The CLI acts as a transparent proxy. You invoke the bridge instead of your application, and inject the bridge configuration before your target daemon arguments.
 
 ```bash
-zig_cli_daemon --daemon-socket <path_to_socket> --daemon-cmd "<fallback_start_cmd>" --daemon-timeout <ms> [--restart] -- <forwarded_args>...
+zig_cli_daemon --daemon-socket <path_to_socket> --daemon-cmd "<fallback_start_cmd>" --daemon-timeout <ms> [--restart] -- cliarg1 cliarg2 ...
 ```
+
+You MUST take a bit of time/effort and setup **alias** to enjoy the benefits of the cli-daemon fully.
+
+```bash
+my_cli_tool cliarg1 cliarg2 ...
+```
+
 
 ### Bridge Arguments
 
@@ -38,8 +45,8 @@ zig_cli_daemon --daemon-socket <path_to_socket> --daemon-cmd "<fallback_start_cm
 cat large_data.json | ./zig_cli_daemon -- parse-json --validate
 ```
 
-**3. Wrapping it via Alias (Recommended Setup):**
-By aliasing it to your shell path, you get frictionless high-performance execution.
+### Wrapping it via Alias (Recommended Setup)
+By aliasing it to your shell path, you get frictionless high-performance execution. On windows add one folder to path and put your alias batch files there.
 
 ```bash
 alias native_graal='/path/to/zig_cli_daemon --daemon-socket /tmp/fast-app.sock --daemon-cmd "java -jar my-worker.jar" --'
@@ -48,6 +55,7 @@ alias native_graal='/path/to/zig_cli_daemon --daemon-socket /tmp/fast-app.sock -
 native_graal compile --target=aarch64
 ```
 
+Regardless if you are using windows or linux, find time to setup a place for your own cli tools. If not as important as before, now in age of AI hype, CLI is the king.
 
 ## Compatibility
 
