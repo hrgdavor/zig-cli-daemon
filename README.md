@@ -11,7 +11,10 @@ Initially made to help optimize Java process startup time for repeated tasks lik
 The CLI acts as a transparent proxy. You invoke the bridge instead of your application, and inject the bridge configuration before your target daemon arguments.
 
 ```bash
-zig_cli_daemon --daemon-socket <path_to_socket> --daemon-cmd "<fallback_start_cmd>" --daemon-timeout <ms> [--restart] -- cliarg1 cliarg2 ...
+zig_cli_daemon --daemon-socket <path_to_socket>\
+    --daemon-cmd "<fallback_start_cmd>"\
+    --daemon-timeout <ms> [--restart] --\
+    cliarg1 cliarg2 ...
 ```
 
 You MUST take a bit of time/effort and setup **alias** to enjoy the benefits of the cli-daemon fully.
