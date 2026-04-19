@@ -270,12 +270,8 @@ pub fn main(init: std.process.Init) !void {
             return err;
         };
         if (amt == 0) break;
-        // Advanced Mode: For legacy/basic piping of stdin, we wrap it in stream_data with ID 0.
-        var payload = try allocator.alloc(u8, amt + 1);
-        defer allocator.free(payload);
-        payload[0] = 0; // Stream ID 0
-        @memcpy(payload[1..], input_buf[0..amt]);
-        try sendFrame(sock_writer, .stream_data, false, payload);
+        // Advanced Mode: Send stdin directly using Message Type 1 (symmetric with stdout)
+        try sendFrame(sock_writer, .stdout, false, input_buf[0..amt]);
         try sock_writer.flush();
     }
 }

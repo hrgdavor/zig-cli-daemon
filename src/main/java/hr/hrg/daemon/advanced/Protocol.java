@@ -9,7 +9,7 @@ public class Protocol {
 
     public enum MessageType {
         EXIT_CODE(), // 0
-        STDOUT(), // 1
+        STDIN_STDOUT(), // 1
         STDERR(), // 2
         ARG(), // 3
         ENV_VAR(), // 4
@@ -26,7 +26,7 @@ public class Protocol {
         public static MessageType fromValue(int value) {
             return switch (value) {
                 case 0 -> EXIT_CODE;
-                case 1 -> STDOUT;
+                case 1 -> STDIN_STDOUT;
                 case 2 -> STDERR;
                 case 3 -> ARG;
                 case 4 -> ENV_VAR;

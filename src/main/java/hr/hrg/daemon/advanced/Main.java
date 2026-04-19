@@ -60,10 +60,10 @@ public class Main {
         String pwd = null;
         String execName = null;
 
+        // 1. Initial Protocol Phase: Arguments & Env
         while (true) {
             Protocol.Frame frame = Protocol.readFrame(in);
-            if (frame == null)
-                break;
+            if (frame == null) return;
 
             if (frame.type == Protocol.MessageType.EXIT_CODE) {
                 System.out.println("Shutdown request received. Stopping daemon...");
@@ -75,27 +75,43 @@ public class Main {
                 return;
             } else if (frame.type == Protocol.MessageType.ARG) {
                 String val = new String(frame.payload, StandardCharsets.UTF_8);
-                if (execName == null)
-                    execName = val;
-                else if (pwd == null)
-                    pwd = val;
-                else
-                    clientArgs.add(val);
+                if (execName == null) execName = val;
+                else if (pwd == null) pwd = val;
+                else clientArgs.add(val);
+                
+                if (!frame.more) break; // Last argument received
+            } else if (frame.type == Protocol.MessageType.ENV_VAR) {
+                // Just consume for now
             }
-
-            if (!frame.more && frame.type == Protocol.MessageType.ARG)
-                break;
         }
 
+        // Echo Initial arguments in Uppercase
         for (String arg : clientArgs) {
             String reply = arg.toUpperCase() + "\n";
-            Protocol.writeFrame(out, Protocol.MessageType.STDOUT, true, reply.getBytes(StandardCharsets.UTF_8));
+            Protocol.writeFrame(out, Protocol.MessageType.STDIN_STDOUT, true, reply.getBytes(StandardCharsets.UTF_8));
+        }
+
+        // 2. Persistent Piping Phase: Handle Stdin (Bi-directional)
+        while (true) {
+            Protocol.Frame frame = Protocol.readFrame(in);
+            if (frame == null) break;
+
+            if (frame.type == Protocol.MessageType.STDIN_STDOUT) {
+                // Echo stdin back for demo purposes
+                byte[] payload = frame.payload;
+                for (int i = 0; i < payload.length; i++) {
+                    payload[i] = (byte) Character.toUpperCase((char) payload[i]);
+                }
+                Protocol.writeFrame(out, Protocol.MessageType.STDIN_STDOUT, true, payload);
+                out.flush();
+            } else if (frame.type == Protocol.MessageType.EXIT_CODE) {
+                break; // Client finished
+            }
         }
 
         byte[] exitPayload = new byte[4];
         exitPayload[3] = 0;
         Protocol.writeFrame(out, Protocol.MessageType.EXIT_CODE, false, exitPayload);
-
         out.flush();
     }
 }

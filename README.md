@@ -154,7 +154,7 @@ Uses a ZMTP-style 4-byte header framing protocol to multiplex data types over a 
 | Type  | Name            | Direction     | Payload                                              |
 | ----- | --------------- | ------------- | ---------------------------------------------------- |
 | **0** | **Exit Code**   | Bi-Di         | 4 bytes (Big Endian Exit Status)                     |
-| **1** | **Stdout**      | Daemon -> CLI | Raw stream chunk                                     |
+| **1** | **Stdin/Stdout**| Bi-Di         | CLI Stdin (C->D) or Daemon Stdout (D->C)            |
 | **2** | **Stderr**      | Daemon -> CLI | Raw stream chunk                                     |
 | **3** | **Argument**    | CLI -> Daemon | UTF-8 String (Order: Exec, PWD, Args...)             |
 | **4** | **Env Var**     | CLI -> Daemon | `NAME=VALUE` UTF-8 String                            |
