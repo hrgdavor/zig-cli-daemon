@@ -17,7 +17,7 @@ zig_cli_daemon --daemon-socket <path_to_socket>\
     cliarg1 cliarg2 ...
 ```
 
-You MUST take a bit of time/effort and setup ** alias** to enjoy the benefits of the cli-daemon fully like so:
+You MUST take a bit of time/effort and setup **alias** to enjoy the benefits of the cli-daemon fully like so:
 
 ```bash
 my_cli_tool cliarg1 cliarg2 ...
