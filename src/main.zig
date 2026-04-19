@@ -56,6 +56,7 @@ pub fn main(init: std.process.Init) !void {
     var mode: ProtocolMode = .advanced;
     var client_args: std.ArrayList([]const u8) = .empty;
     defer client_args.deinit(allocator);
+    var body: ?[]const u8 = null;
 
     var i: usize = 1;
     while (i < args.len) {
@@ -72,6 +73,9 @@ pub fn main(init: std.process.Init) !void {
             }
         } else if (std.mem.eql(u8, args[i], "--restart")) {
             is_restart = true;
+        } else if (std.mem.eql(u8, args[i], "--body")) {
+            i += 1;
+            if (i < args.len) body = args[i];
         } else if (std.mem.eql(u8, args[i], "--mode")) {
             i += 1;
             if (i < args.len) {
@@ -159,22 +163,30 @@ pub fn main(init: std.process.Init) !void {
             }
         };
         const thread = try std.Thread.spawn(.{}, pipe_stdout.run_pipe, .{ stream, io });
-        thread.detach();
 
-        var stdin_buf: [BUFFER_SIZE]u8 = undefined;
-        var stdin_file_reader = std.Io.File.stdin().reader(io, &stdin_buf);
-        const stdin_reader = &stdin_file_reader.interface;
-        var write_buf: [BUFFER_SIZE]u8 = undefined;
-        var sock_writer_simple = stream.writer(io, &write_buf);
-        var input_buf: [BUFFER_SIZE]u8 = undefined;
-        while (true) {
-            const amt = stdin_reader.readSliceShort(&input_buf) catch |err| {
-                if (err == error.EndOfStream) break;
-                return err;
-            };
-            if (amt == 0) break;
-            try sock_writer_simple.interface.writeAll(input_buf[0..amt]);
+        if (body) |b| {
+            var sock_writer_simple = stream.writer(io, &[_]u8{});
+            try sock_writer_simple.interface.writeAll(b);
             try sock_writer_simple.interface.flush();
+            try stream.shutdown(io, .send);
+            thread.join();
+        } else {
+            thread.detach();
+            var stdin_buf: [BUFFER_SIZE]u8 = undefined;
+            var stdin_file_reader = std.Io.File.stdin().reader(io, &stdin_buf);
+            const stdin_reader = &stdin_file_reader.interface;
+            var write_buf: [BUFFER_SIZE]u8 = undefined;
+            var sock_writer_simple = stream.writer(io, &write_buf);
+            var input_buf: [BUFFER_SIZE]u8 = undefined;
+            while (true) {
+                const amt = stdin_reader.readSliceShort(&input_buf) catch |err| {
+                    if (err == error.EndOfStream) break;
+                    return err;
+                };
+                if (amt == 0) break;
+                try sock_writer_simple.interface.writeAll(input_buf[0..amt]);
+                try sock_writer_simple.interface.flush();
+            }
         }
         return;
     }
@@ -256,23 +268,30 @@ pub fn main(init: std.process.Init) !void {
     };
 
     const thread = try std.Thread.spawn(.{}, socket_to_stdout.run, .{ stream, io });
-    thread.detach();
 
-    // 5. Main thread: stdin to socket
-    var stdin_buf: [BUFFER_SIZE]u8 = undefined;
-    var stdin_file_reader = std.Io.File.stdin().reader(io, &stdin_buf);
-    const stdin_reader = &stdin_file_reader.interface;
-
-    var input_buf: [BUFFER_SIZE]u8 = undefined;
-    while (true) {
-        const amt = stdin_reader.readSliceShort(&input_buf) catch |err| {
-            if (err == error.EndOfStream) break;
-            return err;
-        };
-        if (amt == 0) break;
-        // Advanced Mode: Send stdin directly using Message Type 1 (symmetric with stdout)
-        try sendFrame(sock_writer, .stdout, false, input_buf[0..amt]);
+    if (body) |b| {
+        try sendFrame(sock_writer, .stdout, false, b);
         try sock_writer.flush();
+        try stream.shutdown(io, .send);
+        thread.join();
+    } else {
+        thread.detach();
+        // 5. Main thread: stdin to socket
+        var stdin_buf: [BUFFER_SIZE]u8 = undefined;
+        var stdin_file_reader = std.Io.File.stdin().reader(io, &stdin_buf);
+        const stdin_reader = &stdin_file_reader.interface;
+
+        var input_buf: [BUFFER_SIZE]u8 = undefined;
+        while (true) {
+            const amt = stdin_reader.readSliceShort(&input_buf) catch |err| {
+                if (err == error.EndOfStream) break;
+                return err;
+            };
+            if (amt == 0) break;
+            // Advanced Mode: Send stdin directly using Message Type 1 (symmetric with stdout)
+            try sendFrame(sock_writer, .stdout, false, input_buf[0..amt]);
+            try sock_writer.flush();
+        }
     }
 }
 
