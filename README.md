@@ -6,6 +6,49 @@ Initially made to help optimize Java process startup time for repeated tasks lik
 
 > High-performance, zero allocation, written in Zig 0.16.0 and faster alternative to `socat + cat` combo.
 
+## Basic Usage
+
+The CLI acts as a transparent proxy. You invoke the bridge instead of your application, and inject the bridge configuration before your target daemon arguments.
+
+```bash
+zig_cli_daemon --daemon-socket <path_to_socket> --daemon-cmd "<fallback_start_cmd>" --daemon-timeout <ms> [--restart] -- <forwarded_args>...
+```
+
+### Bridge Arguments
+
+- `--daemon-socket <path>`: Path to the Unix domain socket (default: `/tmp/java-daemon.sock`).
+- `--daemon-cmd <command>`: Shell command to start the daemon if the socket is missing.
+- `--daemon-timeout <ms>`: Max time in milliseconds to wait for the daemon to start (default: `3000ms`).
+- `--restart`: Sends a Type 0 shutdown signal to a running daemon and exits.
+- `--`: Delimiter separating bridge flags from application arguments.
+- `<forwarded_args>`: The normal CLI arguments your background process is designed to handle.
+
+### Examples
+
+**1. General Invocation:**
+```bash
+./zig_cli_daemon --daemon-socket /tmp/graal-native-server.sock \
+                 --daemon-cmd "/opt/my-app/start_server-native" \
+                 -- build backend --incremental
+```
+
+**2. Standard Input/Output Chaining:**
+```bash
+# Streams live terminal inputs completely into the socket asynchronously
+cat large_data.json | ./zig_cli_daemon -- parse-json --validate
+```
+
+**3. Wrapping it via Alias (Recommended Setup):**
+By aliasing it to your shell path, you get frictionless high-performance execution.
+
+```bash
+alias native_graal='/path/to/zig_cli_daemon --daemon-socket /tmp/fast-app.sock --daemon-cmd "java -jar my-worker.jar" --'
+
+# Execute seamlessly
+native_graal compile --target=aarch64
+```
+
+
 ## Compatibility
 
 This project requires **Native Unix Domain Socket** support.
@@ -60,47 +103,7 @@ zig build -Doptimize=ReleaseFast
 # ./zig-out/bin/zig_cli_daemon(.exe)
 ```
 
-## Basic Usage
-
-The CLI acts as a transparent proxy. You invoke the bridge instead of your application, and inject the bridge configuration before your target daemon arguments.
-
-```bash
-zig_cli_daemon --daemon-socket <path_to_socket> --daemon-cmd "<fallback_start_cmd>" --daemon-timeout <ms> [--restart] -- <forwarded_args>...
-```
-
-### Bridge Arguments
-
-- `--daemon-socket <path>`: Path to the Unix domain socket (default: `/tmp/java-daemon.sock`).
-- `--daemon-cmd <command>`: Shell command to start the daemon if the socket is missing.
-- `--daemon-timeout <ms>`: Max time in milliseconds to wait for the daemon to start (default: `3000ms`).
-- `--restart`: Sends a Type 0 shutdown signal to a running daemon and exits.
-- `--`: Delimiter separating bridge flags from application arguments.
-- `<forwarded_args>`: The normal CLI arguments your background process is designed to handle.
-
-### Examples
-
-**1. General Invocation:**
-```bash
-./zig_cli_daemon --daemon-socket /tmp/graal-native-server.sock \
-                 --daemon-cmd "/opt/my-app/start_server-native" \
-                 -- build backend --incremental
-```
-
-**2. Standard Input/Output Chaining:**
-```bash
-# Streams live terminal inputs completely into the socket asynchronously
-cat large_data.json | ./zig_cli_daemon -- parse-json --validate
-```
-
-**3. Wrapping it via Alias (Recommended Setup):**
-By aliasing it to your shell path, you get frictionless high-performance execution.
-
-```bash
-alias native_graal='/path/to/zig_cli_daemon --daemon-socket /tmp/fast-app.sock --daemon-cmd "java -jar my-worker.jar" --'
-
-# Execute seamlessly
-native_graal compile --target=aarch64
-```
+## Advanced usage
 
 **4. JSON-RPC Communication:**
 Because the CLI seamlessly bridges standard streams, you can use it to transmit formatted RPC payloads to your daemon process. In this example, the daemon expects an `RPC` execution mode, receives the request payload via `stdin`, and returns the JSON-RPC response via `stdout`.

@@ -4,6 +4,17 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.StandardProtocolFamily;
+import java.net.UnixDomainSocketAddress;
+import java.nio.channels.Channels;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Executor;
 
 public class Protocol {
 
@@ -90,5 +101,110 @@ public class Protocol {
         out.write((len >> 8) & 0xFF);
         out.write(len & 0xFF);
         out.write(payload);
+    }
+
+    @FunctionalInterface
+    public interface SessionHandler {
+        void handle(InputStream in, OutputStream out, List<String> args) throws IOException;
+    }
+
+    public static class DaemonServer {
+        private final Path socketPath;
+        private final Executor executor;
+        private final SessionHandler sessionHandler;
+        private final Runnable restartHandler;
+
+        public DaemonServer(Path socketPath, Executor executor, SessionHandler sessionHandler,
+                Runnable restartHandler) {
+            this.socketPath = socketPath;
+            this.executor = executor;
+            this.sessionHandler = sessionHandler;
+            this.restartHandler = restartHandler;
+        }
+
+        public void run() throws IOException {
+            Path parent = socketPath.getParent();
+            if (parent != null && !Files.exists(parent)) {
+                Files.createDirectories(parent);
+            }
+
+            if (Files.exists(socketPath)) {
+                Files.delete(socketPath);
+            }
+
+            UnixDomainSocketAddress address = UnixDomainSocketAddress.of(socketPath);
+
+            try (ServerSocketChannel server = ServerSocketChannel.open(StandardProtocolFamily.UNIX)) {
+                server.bind(address);
+                System.out.println("Advanced Daemon started on " + socketPath + " using "
+                        + System.getProperty("java.runtime.name"));
+
+                if (!System.getProperty("os.name").startsWith("Windows")) {
+                    try {
+                        Files.setPosixFilePermissions(socketPath,
+                                java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+                    } catch (UnsupportedOperationException e) {
+                        System.err.println("Warning: Filesystem does not support POSIX permissions.");
+                    }
+                }
+
+                while (true) {
+                    try {
+                        SocketChannel socket = server.accept();
+                        executor.execute(() -> {
+                            try (socket;
+                                    InputStream in = Channels.newInputStream(socket);
+                                    OutputStream out = Channels.newOutputStream(socket)) {
+                                handleProtocol(in, out);
+                            } catch (Exception e) {
+                                System.err.println("Error handling client: " + e.getMessage());
+                            }
+                        });
+                    } catch (Exception e) {
+                        System.err.println("Error accepting client: " + e.getMessage());
+                    }
+                }
+            }
+        }
+
+        private void handleProtocol(InputStream in, OutputStream out) throws IOException {
+            List<String> clientArgs = new ArrayList<>();
+            String pwd = null;
+            String execName = null;
+
+            while (true) {
+                Frame frame = readFrame(in);
+                if (frame == null)
+                    return;
+
+                if (frame.type == MessageType.EXIT_CODE) {
+                    try {
+                        Files.deleteIfExists(socketPath);
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                    restartHandler.run();
+                    System.exit(0);
+                    return;
+                } else if (frame.type == MessageType.GET_PID) {
+                    String pid = java.lang.management.ManagementFactory.getRuntimeMXBean().getName().split("@")[0];
+                    writeFrame(out, MessageType.GET_PID, false, pid.getBytes(StandardCharsets.UTF_8));
+                    return;
+                } else if (frame.type == MessageType.ARG) {
+                    String val = new String(frame.payload, StandardCharsets.UTF_8);
+                    if (execName == null)
+                        execName = val;
+                    else if (pwd == null)
+                        pwd = val;
+                    else
+                        clientArgs.add(val);
+
+                    if (!frame.more)
+                        break; // Last argument received
+                }
+            }
+
+            sessionHandler.handle(in, out, clientArgs);
+        }
     }
 }
