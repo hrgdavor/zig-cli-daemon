@@ -35,13 +35,37 @@ native_graal compile --target=aarch64
 
 Regardless if you are using windows or linux, find time to setup a place for your own cli tools. If not as important as before, now in age of AI hype, CLI is the king.
 
+## Advanced Usage (Application Management & Security)
 
-### Bridge Arguments
+The CLI bridge transforms a "black box" background process into a manageable service. By utilizing Unix Domain Sockets (UDS) instead of TCP, you gain a high-performance side-channel for administrative tasks without the overhead or risks of exposing network ports.
+
+### 🛡️ Secure Local Administration
+*   **POSIX-Based Access Control**: Security is governed by OS filesystem permissions. By setting the socket directory to `0700`, you ensure only the service owner can manage the application. This structurally prevents unauthorized local users or network probes from accessing internal management endpoints.
+*   **No Shared Secrets**: Authorization can be implicitly handled by the OS. Administrative tasks like `RELOAD_CONFIGURATION` or `PURGE_CACHE` don't require managing fragile API keys for local-only traffic—the kernel validates the connection identity via the socket inode.
+
+### ⚡ Sub-Millisecond Management
+*   **Instant Interaction**: Management requests over UDS bypass the entire TCP/IP stack (handshakes, encapsulation, congestion control). status checks and metrics gathering occur with near-zero latency.
+*   **Lightweight Side-Channel**: Unlike heavy management agents or HTTP servers, the bridge provides a "raw" connection. You can send a JSON trigger via `--body` and receive instant status without waking up a heavy web-server threadpool.
+
+### 🔄 Dynamic Lifecycle & Metrics
+*   **Hot-Reloading**: Trigger configuration updates live without restarting the JVM by sending custom management frames.
+*   **Real-time Metrics**: Stream internal state or live logs directly to the CLI stdout for immediate diagnostic feedback.
+
+> [!TIP]
+> Use the `--body` parameter for one-shot management tasks:
+> `bash
+> ./zig_cli_daemon --body '{"action":"RELOAD_CONFIG"}' -- admin-cmd
+> `
+
+
+
+## Bridge Arguments
 
 - `--daemon-socket <path>`: Path to the Unix domain socket (default: `/tmp/java-daemon.sock`).
 - `--daemon-cmd <command>`: Shell command to start the daemon if the socket is missing.
 - `--daemon-timeout <ms>`: Max time in milliseconds to wait for the daemon to start (default: `3000ms`).
 - `--restart`: Sends a Type 0 shutdown signal to a running daemon and exits.
+- `--body <text>`: Sends the provided text as the application's stdin instead of reading from the real stdin.
 - `--`: Delimiter separating bridge flags from application arguments.
 - `<forwarded_args>`: The normal CLI arguments your background process is designed to handle.
 
@@ -54,7 +78,12 @@ Regardless if you are using windows or linux, find time to setup a place for you
                  -- build backend --incremental
 ```
 
-**2. Standard Input/Output Chaining:**
+**2. Sending a JSON payload directly:**
+```bash
+./zig_cli_daemon --mode advanced --body '{"action": "status", "id": 123}' -- rpc-call
+```
+
+**3. Standard Input/Output Chaining:**
 ```bash
 # Streams live terminal inputs completely into the socket asynchronously
 cat large_data.json | ./zig_cli_daemon -- parse-json --validate
@@ -115,7 +144,7 @@ zig build -Doptimize=ReleaseFast
 # ./zig-out/bin/zig_cli_daemon(.exe)
 ```
 
-## Advanced usage
+## Advanced Workflow Examples
 
 **4. JSON-RPC Communication:**
 Because the CLI seamlessly bridges standard streams, you can use it to transmit formatted RPC payloads to your daemon process. In this example, the daemon expects an `RPC` execution mode, receives the request payload via `stdin`, and returns the JSON-RPC response via `stdout`.
