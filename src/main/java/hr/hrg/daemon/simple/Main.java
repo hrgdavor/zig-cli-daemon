@@ -14,13 +14,15 @@ public class Main {
             System.getProperty("os.name").startsWith("Windows") ? "daemon.sock" : "/tmp/java-daemon.sock"));
 
     public static void main(String[] args) throws IOException {
-        new Protocol.DaemonServer(
+        final Protocol.DaemonServer[] serverRef = new Protocol.DaemonServer[1];
+        serverRef[0] = new Protocol.DaemonServer(
                 SOCKET_PATH,
                 Executors.newVirtualThreadPerTaskExecutor(),
-                Main::handleSimpleSession).run();
+                (in, out) -> handleSimpleSession(in, out, serverRef[0]));
+        serverRef[0].run();
     }
 
-    private static void handleSimpleSession(InputStream in, OutputStream out) {
+    private static void handleSimpleSession(InputStream in, OutputStream out, Protocol.DaemonServer server) {
         try {
             // 1. Read Metadata Block Length prefix
             byte[] lenBuf = new byte[Protocol.METADATA_LENGTH_SIZE];
@@ -56,19 +58,30 @@ public class Main {
                     start = i + 1;
                 }
             }
+            
+            if (metaStrings.isEmpty()) return;
+
+            // Shutdown Protocol Support for Simple Mode
+            if ("__SHUTDOWN__".equals(metaStrings.get(0))) {
+                System.out.println("Simple Mode Shutdown request received. Stopping daemon...");
+                server.stop();
+                return;
+            }
+
             System.out.println("Simple Mode Request: " + metaStrings);
 
-            // 3. Raw Echo Pipe
+            // 3. Raw Echo Pipe with UTF-8 Correctness
+            // For a simple demonstration, we read a block, convert to String, uppercase, write back.
+            // Note: In a production stream, you'd need a CharsetDecoder to handle split sequences.
             byte[] buf = new byte[4096];
             while (true) {
                 int n = in.read(buf);
                 if (n == -1)
                     break;
-                // Simple transformation for demonstration
-                for (int i = 0; i < n; i++) {
-                    buf[i] = (byte) Character.toUpperCase((char) buf[i]);
-                }
-                out.write(buf, 0, n);
+                
+                String received = new String(buf, 0, n, StandardCharsets.UTF_8);
+                String uppercased = received.toUpperCase();
+                out.write(uppercased.getBytes(StandardCharsets.UTF_8));
                 out.flush();
             }
         } catch (Exception e) {

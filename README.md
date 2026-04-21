@@ -6,15 +6,33 @@ Initially made to help optimize Java process startup time for repeated tasks lik
 
 > High-performance, zero allocation, written in Zig 0.16.0 and faster alternative to `socat + cat` combo.
 
-## Basic Usage
-
-The CLI acts as a transparent proxy. You invoke the bridge instead of your application, and inject the bridge configuration before your target daemon arguments.
+## Usage
 
 ```bash
-zig_cli_daemon --daemon-socket <path_to_socket>\
-    --daemon-cmd "<fallback_start_cmd>"\
-    --daemon-timeout <ms> [--restart] --\
-    cliarg1 cliarg2 ...
+CLI Daemon Bridge v0.1.0
+
+Usage: zig_cli_daemon [options] [--] [command args...]
+
+Options:
+  -h, --help                Show this help message
+  -V, --version             Show version information
+  --daemon-socket <path>    Socket path (default: daemon.sock)
+  --daemon-cmd <cmd>       Command to spawn daemon (default: "java -jar daemon.jar")
+  --daemon-timeout <ms>    Wait timeout for daemon startup (default: 3000ms)
+  --restart                 Send restart signal and exit
+  --body <body>             Send text/json payload instead of stdin
+  --mode <simple|advanced>  Protocol mode (default: advanced)
+  --env-allow <pattern>    Regex-ish pattern for environment forwarding
+  --env-deny <pattern>     Regex-ish pattern for environment exclusion
+  --env-test                Print filtered environment and exit
+  --status                  Check if daemon is running and exit
+  --verbose                 Print diagnostic information to stderr
+  --quiet                   Suppress all diagnostic output (default)
+
+Examples:
+  zig_cli_daemon --mode simple ls -la
+  echo "data" | zig_cli_daemon --daemon-socket my.sock
+  zig_cli_daemon --body '{ "id": 1 }' -- my-app
 ```
 
 You MUST take a bit of time/effort and setup **alias** to enjoy the benefits of the cli-daemon fully like so:
@@ -41,7 +59,21 @@ The CLI bridge transforms a "black box" background process into a manageable ser
 
 ### 🛡️ Secure Local Administration
 *   **POSIX-Based Access Control**: Security is governed by OS filesystem permissions. By setting the socket directory to `0700`, you ensure only the service owner can manage the application. This structurally prevents unauthorized local users or network probes from accessing internal management endpoints.
-*   **No Shared Secrets**: Authorization can be implicitly handled by the OS. Administrative tasks like `RELOAD_CONFIGURATION` or `PURGE_CACHE` don't require managing fragile API keys for local-only traffic—the kernel validates the connection identity via the socket inode.
+*   **Socket Access == Management Access**: The daemon shutdown/restart path is intentionally protected by the same socket permissions used for normal daemon control. If the socket is stored in a user-private directory and the file permissions are restricted, only authorized local accounts can connect and issue management frames.
+*   **No Shared Secrets for Local-only Control**: Authorization can be implicitly handled by the OS. Administrative tasks like `RELOAD_CONFIGURATION` or `PURGE_CACHE` don't require managing fragile API keys for local-only traffic—the kernel validates the connection identity via the socket inode.
+*   **Restrict forwarded environment variables**: Do not forward every environment variable blindly. Use `--env-allow` to permit only specific env keys and `--env-deny` to block sensitive values. Example allow patterns: `^PATH$`, `^JAVA_HOME$`, `^USER$`; example deny pattern: `^(AWS|GITHUB|SECRET|TOKEN)_`.
+*   **Test filter matches**: Use `--env-test` to print the environment variable names that would be forwarded under the active allow/deny rules, one name per line. This helps verify regex patterns without connecting to the daemon.
+*   **Optional Hardening**: If you need a second layer of protection beyond filesystem ACLs, consider placing the daemon socket in a user-only directory and/or adding an application-level token. The default model assumes local process isolation and file-permission-based trust, which is the standard security model for Unix domain socket services.
+*   **Windows Security & Philosophy**: On Windows, Unix domain sockets do not inherit the same POSIX-style permission enforcement as on Linux/macOS. As such, any local user can potentially connect to the socket if it is in a shared directory. **Windows support in this project is focused on performance and operational parity ("making it work") rather than providing an equivalent security boundary.** For secure deployments on Windows, we recommend placing your sockets in user-private directories (e.g., `%LOCALAPPDATA%`) and manually setting NTFS ACLs on the socket file.
+*   **Token Example**: A management token can be sent as raw stdin text via `--body` or piped into the CLI, then validated by the daemon before processing sensitive frames.
+
+```bash
+# One-shot token send with --body
+./zig_cli_daemon --daemon-socket /tmp/secure.sock --daemon-cmd "java -jar daemon.jar" --body "SECRET_TOKEN" -- status
+
+# Pipe a token from stdin
+printf '%s' "SECRET_TOKEN" | ./zig_cli_daemon --daemon-socket /tmp/secure.sock --daemon-cmd "java -jar daemon.jar" -- status
+```
 
 ### ⚡ Sub-Millisecond Management
 *   **Instant Interaction**: Management requests over UDS bypass the entire TCP/IP stack (handshakes, encapsulation, congestion control). status checks and metrics gathering occur with near-zero latency.
@@ -58,16 +90,6 @@ The CLI bridge transforms a "black box" background process into a manageable ser
 > `
 
 
-
-## Bridge Arguments
-
-- `--daemon-socket <path>`: Path to the Unix domain socket (default: `/tmp/java-daemon.sock`).
-- `--daemon-cmd <command>`: Shell command to start the daemon if the socket is missing.
-- `--daemon-timeout <ms>`: Max time in milliseconds to wait for the daemon to start (default: `3000ms`).
-- `--restart`: Sends a Type 0 shutdown signal to a running daemon and exits.
-- `--body <text>`: Sends the provided text as the application's stdin instead of reading from the real stdin.
-- `--`: Delimiter separating bridge flags from application arguments.
-- `<forwarded_args>`: The normal CLI arguments your background process is designed to handle.
 
 ### Examples
 
@@ -95,7 +117,7 @@ cat large_data.json | ./zig_cli_daemon -- parse-json --validate
 This project requires **Native Unix Domain Socket** support.
 - **Windows**: Requires **Windows 10 Version 1803** (Build 17063) or newer.
 - **Linux/macOS**: Supported natively on all modern versions.
-- **Java**: Requires **OpenJDK 16+** for native `java.net` support (Project uses **Java 17**).
+- **Java**: Requires **OpenJDK 21+** for native `java.net` support (Project uses **Java 21**).
 - **Zig**: Requires **Zig 0.16.0** (standard library `std.Io` and `std.process` integration).
 
 ## Use cases & Advantages (Unix Sockets vs TCP)
@@ -173,39 +195,7 @@ java -jar new-worker-v2.jar &
 
 ## Technical Protocol Specification
 
-The bridge and daemon must be pre-coordinated to use the same mode. There is no negotiation header.
-
-### Simple Mode (`--mode simple`)
-
-Designed for easy daemon implementation.
-
-1. **Metadata Block**: `[u32 length (BE)] [null-terminated strings...]`
-   - Strings: `exec\0pwd\0arg1\0arg2\0...\0ENV1=val\0ENV2=val\0\0`
-   - Double null (`\0\0`) terminates the block.
-2. **Raw Bidirectional Pipe**: All subsequent bytes flow transparently between CLI stdin/stdout and the daemon socket.
-
-### Advanced Mode (`--mode advanced`, default)
-
-Uses a ZMTP-style 4-byte header framing protocol to multiplex data types over a single connection.
-
-#### Frame Header (4 Bytes)
-- **Byte 0**: `[Type: 7 bits | More: 1 bit]`
-  - `Bits 1-7`: Message Type.
-  - `Bit 0`: `More` flag (1 = another frame follows for this logical message).
-- **Bytes 1-3**: `Payload Length` (24-bit unsigned integer, Big Endian).
-
-#### Message Types
-| Type  | Name            | Direction     | Payload                                              |
-| ----- | --------------- | ------------- | ---------------------------------------------------- |
-| **0** | **Exit Code**   | Bi-Di         | 4 bytes (Big Endian Exit Status)                     |
-| **1** | **Stdin/Stdout**| Bi-Di         | CLI Stdin (C->D) or Daemon Stdout (D->C)            |
-| **2** | **Stderr**      | Daemon -> CLI | Raw stream chunk                                     |
-| **3** | **Argument**    | CLI -> Daemon | UTF-8 String (Order: Exec, PWD, Args...)             |
-| **4** | **Env Var**     | CLI -> Daemon | `NAME=VALUE` UTF-8 String                            |
-| **5** | **Stream Init** | Bi-Di         | `[1 byte ID] [8 bytes total size] [UTF-8 Name/Path]` |
-| **6** | **Stream Data** | Bi-Di         | `[1 byte ID] [Raw Payload]`                          |
-| **7** | **JSON-RPC**    | Bi-Di         | UTF-8 JSON String                                    |
-| **8** | **Get PID**     | Bi-Di         | Returns the Daemon process ID                        |
+For the full protocol details, see [PROTOCOL.md](PROTOCOL.md).
 
 ## Reference Implementations (Java)
 
@@ -222,6 +212,34 @@ Full multiplexed framing protocol.
 ```bash
 java -cp target/daemon-1.0.0.jar hr.hrg.daemon.advanced.Main
 ```
+
+## Java Daemon Build & Run Instructions
+
+Build the Java daemon with Maven from the project root:
+
+```bash
+mvn package
+```
+
+This produces the daemon JAR at:
+
+```bash
+target/daemon-1.0.0.jar
+```
+
+Then run either daemon implementation:
+
+```bash
+java -cp target/daemon-1.0.0.jar hr.hrg.daemon.simple.Main
+```
+
+or:
+
+```bash
+java -cp target/daemon-1.0.0.jar hr.hrg.daemon.advanced.Main
+```
+
+> Note: Java 21 is required to compile and run the daemon implementations.
 
 ## Background Diagnostics
 

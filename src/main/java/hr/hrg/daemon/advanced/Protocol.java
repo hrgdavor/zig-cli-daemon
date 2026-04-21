@@ -13,14 +13,17 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Semaphore;
 
 public class Protocol {
 
     public enum MessageType {
         EXIT_CODE(), // 0
-        STDIN_STDOUT(), // 1
+        DATA(), // 1
         STDERR(), // 2
         ARG(), // 3
         ENV_VAR(), // 4
@@ -28,6 +31,7 @@ public class Protocol {
         STREAM_DATA(), // 6
         JSONRPC(), // 7
         GET_PID(),// 8
+        CANCEL(),// 9
         ;
 
         public int getValue() {
@@ -37,7 +41,7 @@ public class Protocol {
         public static MessageType fromValue(int value) {
             return switch (value) {
                 case 0 -> EXIT_CODE;
-                case 1 -> STDIN_STDOUT;
+                case 1 -> DATA;
                 case 2 -> STDERR;
                 case 3 -> ARG;
                 case 4 -> ENV_VAR;
@@ -45,6 +49,7 @@ public class Protocol {
                 case 6 -> STREAM_DATA;
                 case 7 -> JSONRPC;
                 case 8 -> GET_PID;
+                case 9 -> CANCEL;
                 default -> null;
             };
         }
@@ -105,7 +110,7 @@ public class Protocol {
 
     @FunctionalInterface
     public interface SessionHandler {
-        void handle(InputStream in, OutputStream out, List<String> args) throws IOException;
+        void handle(InputStream in, OutputStream out, List<String> args, Map<String, String> env) throws IOException;
     }
 
     public static class DaemonServer {
@@ -113,13 +118,33 @@ public class Protocol {
         private final Executor executor;
         private final SessionHandler sessionHandler;
         private final Runnable restartHandler;
+        private volatile boolean running = true;
+        private final Semaphore connectionSemaphore;
+        private ServerSocketChannel server;
 
         public DaemonServer(Path socketPath, Executor executor, SessionHandler sessionHandler,
                 Runnable restartHandler) {
+            this(socketPath, executor, sessionHandler, restartHandler, 64);
+        }
+
+        public DaemonServer(Path socketPath, Executor executor, SessionHandler sessionHandler,
+                Runnable restartHandler, int maxConnections) {
             this.socketPath = socketPath;
             this.executor = executor;
             this.sessionHandler = sessionHandler;
             this.restartHandler = restartHandler;
+            this.connectionSemaphore = new Semaphore(maxConnections);
+        }
+
+        public void stop() {
+            running = false;
+            try {
+                if (server != null) {
+                    server.close();
+                }
+            } catch (IOException e) {
+                // Ignore
+            }
         }
 
         public void run() throws IOException {
@@ -132,12 +157,31 @@ public class Protocol {
                 Files.delete(socketPath);
             }
 
+            // Cleanup PID file on exit
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                try {
+                    Files.deleteIfExists(socketPath);
+                    Files.deleteIfExists(Path.of(socketPath.toString() + ".pid"));
+                } catch (IOException e) {
+                    // Ignore
+                }
+            }));
+
             UnixDomainSocketAddress address = UnixDomainSocketAddress.of(socketPath);
 
-            try (ServerSocketChannel server = ServerSocketChannel.open(StandardProtocolFamily.UNIX)) {
+            try (ServerSocketChannel s = ServerSocketChannel.open(StandardProtocolFamily.UNIX)) {
+                this.server = s;
                 server.bind(address);
                 System.out.println("Advanced Daemon started on " + socketPath + " using "
                         + System.getProperty("java.runtime.name"));
+
+                // Write PID file
+                try {
+                    Path pidPath = Path.of(socketPath.toString() + ".pid");
+                    Files.writeString(pidPath, String.valueOf(ProcessHandle.current().pid()));
+                } catch (IOException e) {
+                    System.err.println("Warning: Could not write PID file: " + e.getMessage());
+                }
 
                 if (!System.getProperty("os.name").startsWith("Windows")) {
                     try {
@@ -148,27 +192,41 @@ public class Protocol {
                     }
                 }
 
-                while (true) {
+                while (running) {
                     try {
                         SocketChannel socket = server.accept();
+                        if (!connectionSemaphore.tryAcquire()) {
+                            System.err.println("Maximum connections reached. Rejecting client.");
+                            socket.close();
+                            continue;
+                        }
                         executor.execute(() -> {
                             try (socket;
                                     InputStream in = Channels.newInputStream(socket);
                                     OutputStream out = Channels.newOutputStream(socket)) {
                                 handleProtocol(in, out);
                             } catch (Exception e) {
-                                System.err.println("Error handling client: " + e.getMessage());
+                                if (running) {
+                                    System.err.println("Error handling client: " + e.getMessage());
+                                }
+                            } finally {
+                                connectionSemaphore.release();
                             }
                         });
-                    } catch (Exception e) {
-                        System.err.println("Error accepting client: " + e.getMessage());
+                    } catch (Exception i) {
+                        if (running) {
+                            System.err.println("Error accepting client: " + i.getMessage());
+                        }
                     }
                 }
+            } finally {
+                System.out.println("Server accept loop finished.");
             }
         }
 
         private void handleProtocol(InputStream in, OutputStream out) throws IOException {
             List<String> clientArgs = new ArrayList<>();
+            Map<String, String> env = new HashMap<>();
             String pwd = null;
             String execName = null;
 
@@ -178,18 +236,28 @@ public class Protocol {
                     return;
 
                 if (frame.type == MessageType.EXIT_CODE) {
-                    try {
-                        Files.deleteIfExists(socketPath);
-                    } catch (Exception e) {
-                        e.printStackTrace();
-                    }
                     restartHandler.run();
-                    System.exit(0);
+                    stop();
                     return;
                 } else if (frame.type == MessageType.GET_PID) {
-                    String pid = java.lang.management.ManagementFactory.getRuntimeMXBean().getName().split("@")[0];
-                    writeFrame(out, MessageType.GET_PID, false, pid.getBytes(StandardCharsets.UTF_8));
+                    long pid = ProcessHandle.current().pid();
+                    byte[] pidBuf = new byte[8];
+                    pidBuf[0] = (byte) (pid >> 56);
+                    pidBuf[1] = (byte) (pid >> 48);
+                    pidBuf[2] = (byte) (pid >> 40);
+                    pidBuf[3] = (byte) (pid >> 32);
+                    pidBuf[4] = (byte) (pid >> 24);
+                    pidBuf[5] = (byte) (pid >> 16);
+                    pidBuf[6] = (byte) (pid >> 8);
+                    pidBuf[7] = (byte) (pid);
+                    writeFrame(out, MessageType.GET_PID, false, pidBuf);
                     return;
+                } else if (frame.type == MessageType.ENV_VAR) {
+                    String val = new String(frame.payload, StandardCharsets.UTF_8);
+                    int eqIdx = val.indexOf('=');
+                    if (eqIdx != -1) {
+                        env.put(val.substring(0, eqIdx), val.substring(eqIdx + 1));
+                    }
                 } else if (frame.type == MessageType.ARG) {
                     String val = new String(frame.payload, StandardCharsets.UTF_8);
                     if (execName == null)
@@ -198,13 +266,15 @@ public class Protocol {
                         pwd = val;
                     else
                         clientArgs.add(val);
+                }
 
-                    if (!frame.more)
-                        break; // Last argument received
+                // Any frame with !more signals end of metadata/arguments
+                if (!frame.more) {
+                    break;
                 }
             }
 
-            sessionHandler.handle(in, out, clientArgs);
+            sessionHandler.handle(in, out, clientArgs, env);
         }
     }
 }

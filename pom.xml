@@ -24,6 +24,7 @@
                     <archive>
                         <manifest>
                             <addClasspath>true</addClasspath>
+                            <mainClass>hr.hrg.daemon.advanced.Main</mainClass>
                         </manifest>
                     </archive>
                 </configuration>

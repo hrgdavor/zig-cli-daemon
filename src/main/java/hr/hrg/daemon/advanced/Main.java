@@ -6,6 +6,7 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Executors;
 
 public class Main {
@@ -24,11 +25,11 @@ public class Main {
         System.out.println("Shutdown request received. Stopping daemon...");
     }
 
-    private static void handleAdvancedSession(InputStream in, OutputStream out, List<String> args) throws IOException {
+    private static void handleAdvancedSession(InputStream in, OutputStream out, List<String> args, Map<String, String> env) throws IOException {
         // 1. Business Logic Phase: Echo arguments in Uppercase
         for (String arg : args) {
             String reply = arg.toUpperCase() + "\n";
-            Protocol.writeFrame(out, Protocol.MessageType.STDIN_STDOUT, true, reply.getBytes(StandardCharsets.UTF_8));
+            Protocol.writeFrame(out, Protocol.MessageType.DATA, true, reply.getBytes(StandardCharsets.UTF_8));
         }
 
         // 2. Persistent Piping Phase: Handle Stdin (Bi-directional)
@@ -37,16 +38,17 @@ public class Main {
             if (frame == null)
                 break;
 
-            if (frame.type == Protocol.MessageType.STDIN_STDOUT) {
+            if (frame.type == Protocol.MessageType.DATA) {
                 // Echo stdin back for demo purposes
-                byte[] payload = frame.payload;
-                for (int i = 0; i < payload.length; i++) {
-                    payload[i] = (byte) Character.toUpperCase((char) payload[i]);
-                }
-                Protocol.writeFrame(out, Protocol.MessageType.STDIN_STDOUT, true, payload);
+                String received = new String(frame.payload, StandardCharsets.UTF_8);
+                String uppercased = received.toUpperCase();
+                Protocol.writeFrame(out, Protocol.MessageType.DATA, true, uppercased.getBytes(StandardCharsets.UTF_8));
                 out.flush();
             } else if (frame.type == Protocol.MessageType.EXIT_CODE) {
                 break; // Client finished
+            } else if (frame.type == Protocol.MessageType.CANCEL) {
+                System.out.println("Graceful Abort: Client received interrupt signal. Stop current task.");
+                break;
             }
         }
 
